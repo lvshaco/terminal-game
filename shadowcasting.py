@@ -1,127 +1,105 @@
 # -*- coding: utf8 -*-
+'''
+http://www.roguebasin.com/index.php?title=FOV_using_recursive_shadowcasting
+缺点: 不对称，盲角
 
-import math
-from fractions import Fraction
+菱形墙:
+http://www.adammil.net/blog/v125_Roguelike_Vision_Algorithms.html#diamondwalls
+    1. 解决盲角(通过更宽容来实现), 但是会导致光通过门扩展太多（过于宽容导致可见tile变多）
+        对于对角墙壁可移动的行为会更一致
+改进版:
+        http://www.adammil.net/blog/v125_Roguelike_Vision_Algorithms.html#mine
+        1. 如果一个墙tile的两个相邻都不是墙，则将该角切成斜角。
+        2. 如果光束与墙的形状相交，则墙tile可见；
+        3. 如果光束与中心正方形（size最大为tile的1/2）相交，则空白tile可见。
+        4. 与图形成切线不算相交，并且零宽度的扇形无法照亮
+'''
+
 from tgame import *
 
-def compute_fov(origin, is_blocking, mark_visible):
+class Map(object):
+    # Multipliers for transforming coordinates to other octants:
+    mult = [
+                [1,  0,  0, -1, -1,  0,  0,  1],
+                [0,  1, -1,  0,  0, -1,  1,  0],
+                [0,  1,  1,  0,  0, -1, -1,  0],
+                [1,  0,  0,  1, -1,  0,  0, -1]
+            ]
+    def __init__(self, map):
+        self.data = map
+        self.width, self.height = len(map[0]), len(map)
+        self.light = []
+        for i in range(self.height):
+            self.light.append([0] * self.width)
+        self.flag = 0
+    def square(self, x, y):
+        return self.data[y][x]
+    def blocked(self, x, y):
+        return (x < 0 or y < 0
+                or x >= self.width or y >= self.height
+                or self.data[y][x] == "#")
+    def lit(self, x, y):
+        return self.light[y][x] == self.flag
+    def set_lit(self, x, y):
+        if 0 <= x < self.width and 0 <= y < self.height:
+            self.light[y][x] = self.flag
+    def _cast_light(self, cx, cy, row, col, start, end, radius, xx, xy, yx, yy, id):
+        "Recursive lightcasting function"
+        if start <= end:
+            return
+        radius_squared = radius*radius
+        for j in range(row, radius+1):
+            dx, dy = -j-1, -j
+            #dy = -j
+            blocked = False
+            start_col = -j
+            while dx <= 0:
+                dx += 1
+            #for dx in range(-j, 1, 1):
+                # Translate the dx, dy coordinates into map coordinates:
+                X, Y = cx + dx * xx + dy * xy, cy + dx * yx + dy * yy
+                # l_slope and r_slope store the slopes of the left and right
+                # extremities of the square we're considering:
+                # 原点到格子左上角，右下角的斜率
+                l_slope, r_slope = (dx-0.5)/(dy+0.5), (dx+0.5)/(dy-0.5)
+                #l_slope, r_slope = (dx-0.25)/(dy+0.25), (dx+0.25)/(dy-0.25)
+                # 如此则格子的任何部分(而非中心)被包括在扫描范围就算到视野里
+                if start <= r_slope:
+                    continue
+                elif end >= l_slope:
+                    break
+                else:
+                    # Our light beam is touching this square; light it:
+                    if dx*dx + dy*dy < radius_squared:
+                        self.set_lit(X, Y)
+                    if blocked:
+                        # we're scanning a row of blocked squares:
+                        if self.blocked(X, Y):
+                            new_start = r_slope
+                            continue
+                        else:
+                            blocked = False
+                            start = new_start
+                            start_col = dx
+                    else:
+                        if self.blocked(X, Y) and j < radius:
+                            # This is a blocking square, start a child scan:
+                            blocked = True
+                            self._cast_light(cx, cy, j+1, start_col-1, start, l_slope,
+                                             radius, xx, xy, yx, yy, id+1)
+                            new_start = r_slope
+            # Row is scanned; do next row unless last square was blocked:
+            if blocked:
+                break
+    def do_fov(self, x, y, radius):
+        "Calculate lit squares from the given location and radius"
+        self.flag += 1
+        for oct in range(8):
+            self._cast_light(x, y, 1, -1, 1.0, 0.0, radius,
+                             self.mult[0][oct], self.mult[1][oct],
+                             self.mult[2][oct], self.mult[3][oct], 0)
 
-    mark_visible(*origin)
-
-    for i in range(4):
-        #if i != 2:
-        #    continue
-        quadrant = Quadrant(i, origin)
-        def reveal(tile):
-            x, y = quadrant.transform(tile)
-            mark_visible(x, y)
-
-        def is_wall(tile):
-            if tile is None:
-                return False
-            x, y = quadrant.transform(tile)
-            return is_blocking(x, y)
-
-        def is_floor(tile):
-            if tile is None:
-                return False
-            x, y = quadrant.transform(tile)
-            return not is_blocking(x, y)
-        def scan(row):
-            #if row.depth > 4:
-                #return
-            #print "[%d]"%(row.depth), row.start_slope, row.end_slope
-            prev_tile = None
-            for tile in row.tiles():
-                if is_wall(tile) or is_symmetric(row, tile):
-                    reveal(tile)
-                if is_wall(prev_tile) and is_floor(tile):
-                    row.start_slope = slope(tile)
-                    #print "  ", row.depth, row.start_slope, "=", row.end_slope
-                if is_floor(prev_tile) and is_wall(tile):
-                    next_row = row.next()
-                    next_row.end_slope = slope(tile)
-                    scan(next_row)
-                prev_tile = tile
-            if is_floor(prev_tile):
-                scan(row.next())
-
-        first_row = Row(1, Fraction(-1), Fraction(1))
-        scan(first_row)
-north = 0
-east  = 1
-south = 2
-west  = 3
-class Quadrant:
-
-
-    def __init__(self, cardinal, origin):
-        self.cardinal = cardinal
-        self.ox, self.oy = origin
-    def transform(self, tile):
-        row, col = tile
-        if self.cardinal == north:
-            return (self.ox + col, self.oy - row)
-        if self.cardinal == south:
-            return (self.ox + col, self.oy + row)
-        if self.cardinal == east:
-            return (self.ox + row, self.oy + col)
-        if self.cardinal == west:
-            return (self.ox - row, self.oy + col)
-class Row:
-
-    def __init__(self, depth, start_slope, end_slope):
-        self.depth = depth
-        self.start_slope = start_slope
-        self.end_slope = end_slope
-    def tiles(self):
-        min_col = round_ties_up(self.depth * self.start_slope)
-        max_col = round_ties_down(self.depth * self.end_slope)
-        min_col = int(min_col)
-        max_col = int(max_col)
-        #print "  [tiles:%d]"%self.depth, min_col, "->", max_col
-
-        for col in range(min_col, max_col + 1):
-            yield (self.depth, col)
-
-    def next(self):
-        return Row(
-            self.depth + 1,
-            self.start_slope,
-            self.end_slope)
-def slope(tile):
-    row_depth, col = tile
-    return Fraction(2 * col - 1, 2 * row_depth)
-def is_symmetric(row, tile):
-    row_depth, col = tile
-    return (col >= row.depth * row.start_slope
-        and col <= row.depth * row.end_slope)
-def round_ties_up(n):
-    return math.floor(n + 0.5)
-
-def round_ties_down(n):
-    return math.ceil(n - 0.5)
-
-def scan_iterative(row):
-    rows = [row]
-    while rows:
-        row = rows.pop()
-        prev_tile = None
-        for tile in row.tiles():
-            if is_wall(tile) or is_symmetric(row, tile):
-                reveal(tile)
-            if is_wall(prev_tile) and is_floor(tile):
-                row.start_slope = slope(tile)
-            if is_floor(prev_tile) and is_wall(tile):
-                next_row = row.next()
-                next_row.end_slope = slope(tile)
-                rows.append(next_row)
-            prev_tile = tile
-        if is_floor(prev_tile):
-            rows.append(row.next())
-
-
-FOV_RADIUS = 10
+FOV_RADIUS = 100
 
 dungeon =  ["###########################################################",
             "#...........#.............................................#",
@@ -142,46 +120,13 @@ dungeon =  ["###########################################################",
             "#.........................................................#",
             "###########################################################"]
 
-class Map:
-    def __init__(self, map):
-        self.data = map
-        self.width, self.height = len(map[0]), len(map)
-        self.light = []
-        for i in range(self.height):
-            self.light.append([0] * self.width)
-        self.flag = 0
-
-    def is_blocking(self, x, y):
-        return (x < 0 or y < 0
-                or x >= self.width or y >= self.height
-                or self.data[y][x] == "#")
-
-    def mark_visible(self, x, y):
-        if 0 <= x < self.width and 0 <= y < self.height:
-            self.light[y][x] = self.flag
-
-    def lit(self, x, y):
-        return self.light[y][x] == self.flag
-
-    def square(self, x, y):
-        return self.data[y][x]
-
 if __name__ == '__main__':
     try:
         s = tgame_init()
         map = Map(dungeon)
         x, y = 36, 13
-
-        def is_blocking(x, y):
-            return map.is_blocking(x, y)
-
-        def mark_visible(x, y):
-            map.mark_visible(x, y)
-
         while True:
-            origin=(x, y)
-            map.flag += 1
-            compute_fov(origin, is_blocking, mark_visible)
+            map.do_fov(x, y, FOV_RADIUS)
             tgame_display(s, map, x, y)
             k = s.getch()
             if k == 27:
